@@ -222,6 +222,7 @@ void function CodeCallback_OnPlayerRespawned( entity player )
 	player.SetPredictionEnabled( true )
 	Loadouts_TryGivePilotLoadout( player )
 	SetHumanRagdollImpactTable( player )
+ 	ClearLastAttacker( player ) // so dying to anything doesn't credit the same attacker after respawning
 	
 	foreach ( entity weapon in player.GetMainWeapons() )
 		weapon.SetProScreenOwner( player )
@@ -261,7 +262,7 @@ void function PostDeathThread_MP( entity player, var damageInfo ) // based on ga
 	player.SetNoTargetSmartAmmo( false )
 	player.ClearExtraWeaponMods()
 	
-	player.AddToPlayerGameStat( PGS_DEATHS, 1 )
+
 	
 	if ( player.IsTitan() )
 		SoulDies( player.GetTitanSoul(), damageInfo ) // cleanup some titan stuff, no idea where else to put this
@@ -276,8 +277,23 @@ void function PostDeathThread_MP( entity player, var damageInfo ) // based on ga
 		player.s.inPostDeath = false
 	})
 
+
 	entity attacker = DamageInfo_GetAttacker( damageInfo )
 	int methodOfDeath = DamageInfo_GetDamageSourceIdentifier( damageInfo )
+
+	table<int, bool> alreadyAssisted
+	foreach( DamageHistoryStruct attackerInfo in player.e.recentDamageHistory )
+	{
+		bool exists = attackerInfo.attacker.GetEncodedEHandle() in alreadyAssisted ? true : false
+		if( attackerInfo.attacker != attacker && !exists )
+		{
+			alreadyAssisted[attackerInfo.attacker.GetEncodedEHandle()] <- true
+			Remote_CallFunction_NonReplay( attackerInfo.attacker, "ServerCallback_SetAssistInformation", attackerInfo.damageSourceId, attacker.GetEncodedEHandle(), player.GetEncodedEHandle(), attackerInfo.time ) 
+			AddPlayerScore(attackerInfo.attacker, "PilotAssist" )
+		}
+
+
+	}
 
 	player.p.rematchOrigin = player.p.deathOrigin
 	if ( IsValid( attacker ) && methodOfDeath == eDamageSourceId.titan_execution )
@@ -301,6 +317,9 @@ void function PostDeathThread_MP( entity player, var damageInfo ) // based on ga
 		player.SetObserverTarget( attacker )
 	else
 		player.SetObserverTarget( null )
+	
+	if ( ( GamePlayingOrSuddenDeath() || GetGameState() == eGameState.Epilogue ) && !file.playerDeathsHidden )
+		player.AddToPlayerGameStat( PGS_DEATHS, 1 )
 	
 	if ( !file.playerDeathsHidden )
 		Remote_CallFunction_NonReplay( player, "ServerCallback_YouDied", attacker.GetEncodedEHandle(), GetHealthFrac( attacker ), methodOfDeath )
@@ -410,7 +429,7 @@ void function RespawnAsTitan( entity player, bool manualPosition = false )
 	player.isSpawning = true
 	entity spawnpoint = FindSpawnPoint( player, true, ( ShouldStartSpawn( player ) || Flag( "ForceStartSpawn" ) ) && !IsFFAGame() )
 
-	TitanLoadoutDef titanLoadout = GetTitanLoadoutForPlayer( player )
+ 	TitanLoadoutDef titanLoadout = GetTitanLoadoutForPlayer( player )
 	
 	asset model = GetPlayerSettingsAssetForClassName( titanLoadout.setFile, "bodymodel" )
 	Attachment warpAttach = GetAttachmentAtTimeFromModel( model, "at_hotdrop_01", "offset", spawnpoint.GetOrigin(), spawnpoint.GetAngles(), 0 )
@@ -441,6 +460,7 @@ void function RespawnAsTitan( entity player, bool manualPosition = false )
 	camera.Fire( "Enable", "!activator", 0, player )
 	
 	player.EndSignal( "OnDestroy" )
+	titan.EndSignal( "OnDestroy" )
 	OnThreadEnd( function() : ( player, titan, camera )
 	{
 		if ( IsValid( player ) )
@@ -449,7 +469,11 @@ void function RespawnAsTitan( entity player, bool manualPosition = false )
 			player.isSpawning = false
 		}
 	
-		titan.Destroy() // pilotbecomestitan leaves an npc titan that we need to delete
+		if ( IsValid( titan ) )
+			titan.Destroy() // pilotbecomestitan leaves an npc titan that we need to delete
+		else
+			RespawnAsPilot( player ) // this is 100% an edgecase, just avoid softlocking if we ever hit it in playable gamestates
+			
 		camera.Fire( "Disable", "!activator", 0, player )
 		camera.Destroy()
 	})
